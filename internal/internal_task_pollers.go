@@ -1748,6 +1748,15 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 
 	// in case if activity execution failed, request should be of type RespondActivityTaskFailedRequest
 	if req, ok := request.(*workflowservice.RespondActivityTaskFailedRequest); ok {
+		// Surface the stable, sanitized retry summary (attempt + final reason
+		// category + retry decision). It contains no failure message or details.
+		if result.retrySummary != nil {
+			atp.logger.Debug("Activity attempt failed",
+				tagWorkflowType, workflowType,
+				tagActivityType, activityType,
+				tagActivityRetrySummary, result.retrySummary.String(),
+			)
+		}
 		if !isBenignProtoApplicationFailure(req.Failure) {
 			failureReason := metrics.FailureReasonActivityError
 			if errors.As(result.failureErr, new(payloadSizeError)) {

@@ -91,6 +91,11 @@ type (
 		// failureErr is the error behind a failed response when the worker produced the failure
 		// itself, so callers can classify it. Nil when the activity reported the failure.
 		failureErr error
+		// retrySummary is the sanitized activity retry error summary for a non-successful
+		// (failed or canceled) activity result: it carries the attempt number, a stable final
+		// reason category and the worker-local retry decision. It never contains failure
+		// messages or details. Nil for successful or pending results.
+		retrySummary *ActivityRetrySummary
 	}
 
 	// ActivityTaskHandler represents activity task handlers.

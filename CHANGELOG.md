@@ -22,6 +22,10 @@ to docs, or any other relevant information.
 
 ### Added
 
+- Activity failures now produce a stable, sanitized retry error summary, available as
+  `temporal.ActivityRetrySummary`, carrying the 1-based attempt number, a coarse final reason
+  category (`temporal.ActivityFailureReason`) and the worker retry decision. It never includes
+  failure messages or details, and is independent of history event encoding.
 - `TestWorkflowEnvironment` and `TestActivityEnvironment` now run worker plugins set through
   `SetWorkerOptions(worker.Options{Plugins: ...})`, which were previously ignored. Once plugins are
   set, `SetWorkerOptions` may not be called again on that environment, and what a plugin registers

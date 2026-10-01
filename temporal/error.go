@@ -276,3 +276,34 @@ const (
 	// ApplicationErrorCategoryBenign indicates an error that is expected under normal operation and should not trigger alerts.
 	ApplicationErrorCategoryBenign = internal.ApplicationErrorCategoryBenign
 )
+
+// ActivityFailureReason is the stable, coarse-grained category of the final
+// reason an activity attempt ended. It deliberately carries no error message,
+// type name, details or stack trace, so summaries never expose sensitive
+// failure contents.
+type ActivityFailureReason = internal.ActivityFailureReason
+
+const (
+	// ActivityFailureReasonApplication is a user/application failure reported from activity code.
+	ActivityFailureReasonApplication = internal.ActivityFailureReasonApplication
+	// ActivityFailureReasonNonRetryableApplication is an application failure explicitly marked non-retryable.
+	ActivityFailureReasonNonRetryableApplication = internal.ActivityFailureReasonNonRetryableApplication
+	// ActivityFailureReasonTimeout is an activity timeout.
+	ActivityFailureReasonTimeout = internal.ActivityFailureReasonTimeout
+	// ActivityFailureReasonCancellation is an activity cancellation, which is never retried.
+	ActivityFailureReasonCancellation = internal.ActivityFailureReasonCancellation
+	// ActivityFailureReasonPanic is a failure caused by an activity panic.
+	ActivityFailureReasonPanic = internal.ActivityFailureReasonPanic
+	// ActivityFailureReasonTermination is a failure caused by termination.
+	ActivityFailureReasonTermination = internal.ActivityFailureReasonTermination
+	// ActivityFailureReasonServer is a (typically non-retryable) server error.
+	ActivityFailureReasonServer = internal.ActivityFailureReasonServer
+	// ActivityFailureReasonUnknown is any failure that does not fit a known category.
+	ActivityFailureReasonUnknown = internal.ActivityFailureReasonUnknown
+)
+
+// ActivityRetrySummary is a stable, sanitized summary of why an activity
+// attempt finished and whether it is eligible for another attempt. It contains
+// the 1-based attempt number, the final failure reason category and the worker
+// retry decision; it never contains failure messages or details.
+type ActivityRetrySummary = internal.ActivityRetrySummary

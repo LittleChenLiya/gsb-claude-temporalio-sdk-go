@@ -24,6 +24,7 @@ const (
 	tagLinkURL                      = "LinkURL"
 	tagStackTrace                   = "StackTrace"
 	tagAttempt                      = "Attempt"
+	tagActivityRetrySummary         = "ActivityRetrySummary"
 	tagTaskFirstEventID             = "TaskFirstEventID"
 	tagTaskStartedEventID           = "TaskStartedEventID"
 	tagPreviousStartedEventID       = "PreviousStartedEventID"

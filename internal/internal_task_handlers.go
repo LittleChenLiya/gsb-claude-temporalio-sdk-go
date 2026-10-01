@@ -2399,9 +2399,11 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 	}
 
 	if err := visitProtoPayloads(canCtx, ath.inboundPayloadVisitor, t, ath.payloadVisitorConcurrency); err != nil {
+		summary := summarizeActivityFailure(err, t.GetAttempt(), nil)
 		return activityTaskResult{
-			response:   ath.visitorErrorToActivityFailure("Activity task preprocess error: ", t, err),
-			failureErr: err,
+			response:     ath.visitorErrorToActivityFailure("Activity task preprocess error: ", t, err),
+			failureErr:   err,
+			retrySummary: &summary,
 		}, nil
 	}
 
@@ -2431,9 +2433,15 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 		// In case if activity is not registered we should report a failure to the server to allow activity retry
 		// instead of making it stuck on the same attempt.
 		metricsHandler.Counter(metrics.UnregisteredActivityInvocationCounter).Inc(1)
-		return activityTaskResult{response: convertActivityResultToRespondRequest(ath.identity, t.TaskToken, nil,
-			NewActivityNotRegisteredError(activityType, ath.getRegisteredActivityNames()),
-			dataConverter, failureConverter, ath.namespace, false, ath.versionStamp, ath.deployment, ath.workerDeploymentOptions)}, nil
+		notRegisteredErr := NewActivityNotRegisteredError(activityType, ath.getRegisteredActivityNames())
+		summary := summarizeActivityFailure(notRegisteredErr, t.GetAttempt(), nil)
+		return activityTaskResult{
+			response: convertActivityResultToRespondRequest(ath.identity, t.TaskToken, nil,
+				notRegisteredErr,
+				dataConverter, failureConverter, ath.namespace, false, ath.versionStamp, ath.deployment, ath.workerDeploymentOptions),
+			failureErr:   notRegisteredErr,
+			retrySummary: &summary,
+		}, nil
 	}
 
 	// panic handler
@@ -2450,9 +2458,12 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 				tagPanicStack, st)
 			metricsHandler.Counter(metrics.ActivityTaskErrorCounter).Inc(1)
 			panicErr := newPanicError(p, st)
+			panicSummary := summarizeActivityFailure(panicErr, t.GetAttempt(), nil)
 			result = activityTaskResult{
 				response: convertActivityResultToRespondRequest(ath.identity, t.TaskToken, nil, panicErr,
 					dataConverter, failureConverter, ath.namespace, false, ath.versionStamp, ath.deployment, ath.workerDeploymentOptions),
+				failureErr:   panicErr,
+				retrySummary: &panicSummary,
 			}
 		}
 	}()
@@ -2481,6 +2492,17 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 	// ErrWorkerShutdown or ErrActivityPaused
 	isActivityCanceled := ctx.Err() == context.Canceled && IsCanceledError(context.Cause(ctx))
 
+	// terminalFailure is the error used for the stable retry summary. For a
+	// canceled activity the activity returns ctx.Err() (a plain context.Canceled),
+	// but the cancellation reason carries the *CanceledError, so use it to make
+	// sure cancellation is classified correctly and never reported as retryable.
+	terminalFailure := err
+	if isActivityCanceled && !IsCanceledError(terminalFailure) {
+		if cancelCause := context.Cause(ctx); IsCanceledError(cancelCause) {
+			terminalFailure = cancelCause
+		}
+	}
+
 	dlCancelFunc()
 	if <-ctx.Done(); ctx.Err() == context.DeadlineExceeded {
 		ath.logger.Info("Activity complete after timeout.",
@@ -2494,6 +2516,9 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 		return activityTaskResult{}, ctx.Err()
 	}
 	if err != nil && err != ErrActivityResultPending {
+		// Stable, sanitized retry summary (attempt + final reason category + retry
+		// decision). It never contains the error message or details, so it is safe
+		// to log alongside the raw error.
 		logFunc := ath.logger.Error // Default to Error
 		if isBenignApplicationError(err) {
 			logFunc = ath.logger.Debug // Downgrade to Debug for benign application errors
@@ -2504,6 +2529,7 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 			tagActivityType, activityType,
 			tagAttempt, t.Attempt,
 			tagError, err,
+			tagActivityRetrySummary, summarizeActivityFailure(terminalFailure, t.GetAttempt(), nil).String(),
 		)
 	}
 
@@ -2535,14 +2561,23 @@ func (ath *activityTaskHandlerImpl) Execute(taskQueue string, t *workflowservice
 		}
 		outboundCtx := extstore.WithStorageTarget(outboundBase, storageTarget)
 		if err := visitProtoPayloads(outboundCtx, ath.outboundPayloadVisitor, msg, ath.payloadVisitorConcurrency); err != nil {
+			postSummary := summarizeActivityFailure(err, t.GetAttempt(), nil)
 			return activityTaskResult{
-				response:   ath.visitorErrorToActivityFailure("Activity task postprocess error: ", t, err),
-				failureErr: err,
+				response:     ath.visitorErrorToActivityFailure("Activity task postprocess error: ", t, err),
+				failureErr:   err,
+				retrySummary: &postSummary,
 			}, nil
 		}
 	}
 
-	return activityTaskResult{response: response}, nil
+	finalResult := activityTaskResult{response: response}
+	// Attach the sanitized retry summary for any terminal, non-successful result
+	// (failed or canceled). Successful and pending results carry no summary.
+	if err != nil && err != ErrActivityResultPending {
+		summary := summarizeActivityFailure(terminalFailure, t.GetAttempt(), nil)
+		finalResult.retrySummary = &summary
+	}
+	return finalResult, nil
 }
 
 func (ath *activityTaskHandlerImpl) visitorErrorToActivityFailure(msgPrefix string, t *workflowservice.PollActivityTaskQueueResponse, err error) *workflowservice.RespondActivityTaskFailedRequest {
