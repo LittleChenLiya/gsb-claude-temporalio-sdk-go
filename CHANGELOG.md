@@ -22,6 +22,11 @@ to docs, or any other relevant information.
 
 ### Added
 
+- `client.StartWorkflowOptions.IdempotencyKey` adds an optional client-side idempotency key to
+  `ExecuteWorkflow`. Concurrent starts with the same key are coalesced into a single
+  `StartWorkflowExecution` RPC and share its result, while local retries reuse one deterministic
+  gRPC `RequestId`. Different keys are never coalesced, and a canceled or finished call removes its
+  pending state so subsequent calls are sent as new requests.
 - `TestWorkflowEnvironment` and `TestActivityEnvironment` now run worker plugins set through
   `SetWorkerOptions(worker.Options{Plugins: ...})`, which were previously ignored. Once plugins are
   set, `SetWorkerOptions` may not be called again on that environment, and what a plugin registers

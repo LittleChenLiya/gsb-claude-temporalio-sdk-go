@@ -90,6 +90,7 @@ type (
 		sdkName                  string
 		sdkVersion               string
 		heartbeatManager         *heartbeatManager
+		idempotentStarts         *idempotentStartCoordinator
 
 		// The pointer value is shared across multiple clients. If non-nil, only
 		// access/mutate atomically.
@@ -2179,6 +2180,10 @@ func (w *workflowClientInterceptor) createStartWorkflowRequest(
 
 	if in.Options.requestID != "" {
 		startRequest.RequestId = in.Options.requestID
+	} else if in.Options.IdempotencyKey != "" {
+		// A deterministic ID keeps local gRPC retries and re-issued starts on
+		// the same key on one server-visible request identifier.
+		startRequest.RequestId = requestIDFromIdempotencyKey(in.Options.IdempotencyKey)
 	} else {
 		startRequest.RequestId = uuid.NewString()
 	}
@@ -2191,6 +2196,18 @@ func (w *workflowClientInterceptor) createStartWorkflowRequest(
 }
 
 func (w *workflowClientInterceptor) ExecuteWorkflow(
+	ctx context.Context,
+	in *ClientExecuteWorkflowInput,
+) (WorkflowRun, error) {
+	if key := in.Options.IdempotencyKey; key != "" {
+		return w.client.idempotentStarts.do(ctx, key, func(leaderCtx context.Context) (WorkflowRun, error) {
+			return w.executeWorkflow(leaderCtx, in)
+		})
+	}
+	return w.executeWorkflow(ctx, in)
+}
+
+func (w *workflowClientInterceptor) executeWorkflow(
 	ctx context.Context,
 	in *ClientExecuteWorkflowInput,
 ) (WorkflowRun, error) {

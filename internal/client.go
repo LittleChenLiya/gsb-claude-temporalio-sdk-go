@@ -1306,6 +1306,22 @@ type (
 		// task processing when tasks are backed up in a queue.
 		Priority Priority
 
+		// IdempotencyKey is an optional client-side idempotency key for this
+		// start request.
+		//
+		// When set, concurrent ExecuteWorkflow calls using the same key are
+		// coalesced: only the first call sends the StartWorkflowExecution RPC
+		// and the other calls wait for its result. Calls with different keys
+		// are never coalesced, and a call that finishes (including one canceled
+		// via its context) removes its pending state, so later callers start a
+		// fresh request. The same key also produces a deterministic gRPC
+		// RequestId, so local (in-process) retries of the RPC reuse one request
+		// identifier. Callers must ensure that requests sharing a key are
+		// semantically identical, including workflow ID and options.
+		//
+		// Optional: defaults to no coalescing and a randomly generated RequestId.
+		IdempotencyKey string
+
 		// responseInfo - Optional pointer to store information of StartWorkflowExecution response.
 		// Only settable by the SDK - e.g. [temporalnexus.workflowRunOperation].
 		responseInfo *startWorkflowResponseInfo
@@ -1735,6 +1751,7 @@ func NewServiceClient(workflowServiceClient workflowservice.WorkflowServiceClien
 		storageParams:           storageParams,
 		storageDriverTypes:      storageDriverTypes,
 		payloadWarningLimits:    payloadWarningLimits,
+		idempotentStarts:        newIdempotentStartCoordinator(),
 	}
 
 	if heartbeatInterval > 0 {
