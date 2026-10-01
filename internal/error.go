@@ -366,6 +366,51 @@ type (
 	}
 )
 
+// ActivityRetryErrorReason is the stable category of an activity retry error.
+// It is derived from the error type and retry decision, never from the error
+// message, so it is safe to include in logs and history without leaking
+// sensitive details.
+//
+// Exposed as: [go.temporal.io/sdk/temporal.ActivityRetryErrorReason]
+type ActivityRetryErrorReason int
+
+const (
+	// ActivityRetryErrorReasonUnspecified is the zero value; no error occurred
+	// or the reason could not be determined.
+	ActivityRetryErrorReasonUnspecified ActivityRetryErrorReason = iota
+	// ActivityRetryErrorReasonRetryable means the error is retryable and the
+	// activity will be (or was) retried according to the retry policy.
+	ActivityRetryErrorReasonRetryable
+	// ActivityRetryErrorReasonNonRetryable means the error is marked
+	// non-retryable (e.g. *ApplicationError with NonRetryable set, or an error
+	// type listed in RetryPolicy.NonRetryableErrorTypes).
+	ActivityRetryErrorReasonNonRetryable
+	// ActivityRetryErrorReasonCanceled means the activity was canceled.
+	ActivityRetryErrorReasonCanceled
+	// ActivityRetryErrorReasonTimeout means the activity timed out.
+	ActivityRetryErrorReasonTimeout
+	// ActivityRetryErrorReasonMaxAttemptsReached means the retry policy's
+	// MaximumAttempts limit was reached.
+	ActivityRetryErrorReasonMaxAttemptsReached
+	// ActivityRetryErrorReasonRetryPolicyNotSet means no retry policy was
+	// configured for the activity.
+	ActivityRetryErrorReasonRetryPolicyNotSet
+)
+
+// ActivityRetryErrorSummary is a stable, non-sensitive summary of an activity
+// retry error. It captures the attempt number and the final reason category
+// without including any error message or details that might contain sensitive
+// information.
+//
+// Exposed as: [go.temporal.io/sdk/temporal.ActivityRetryErrorSummary]
+type ActivityRetryErrorSummary struct {
+	// Attempt is the activity attempt number (starting from 1) that this
+	// summary describes.
+	Attempt int32
+	// Reason is the stable category of the retry error.
+	Reason ActivityRetryErrorReason
+}
+
 var (
 	// Should be "errorString".
 	goErrType = reflect.TypeOf(errors.New("")).Elem().Name()

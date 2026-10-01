@@ -138,6 +138,18 @@ type (
 	// QueryRejectedError is a possible error that can be returned by
 	// ClientOutboundInterceptor.QueryWorkflow to indicate that the query was rejected by the server.
 	QueryRejectedError = internal.QueryRejectedError
+
+	// ActivityRetryErrorReason is the stable category of an activity retry
+	// error. It is derived from the error type and retry decision, never from
+	// the error message, so it is safe to include in logs and history without
+	// leaking sensitive details.
+	ActivityRetryErrorReason = internal.ActivityRetryErrorReason
+
+	// ActivityRetryErrorSummary is a stable, non-sensitive summary of an
+	// activity retry error. It captures the attempt number and the final
+	// reason category without including any error message or details that
+	// might contain sensitive information.
+	ActivityRetryErrorSummary = internal.ActivityRetryErrorSummary
 )
 
 var (
@@ -275,4 +287,27 @@ const (
 	ApplicationErrorCategoryUnspecified = internal.ApplicationErrorCategoryUnspecified
 	// ApplicationErrorCategoryBenign indicates an error that is expected under normal operation and should not trigger alerts.
 	ApplicationErrorCategoryBenign = internal.ApplicationErrorCategoryBenign
+)
+
+const (
+	// ActivityRetryErrorReasonUnspecified is the zero value; no error occurred
+	// or the reason could not be determined.
+	ActivityRetryErrorReasonUnspecified = internal.ActivityRetryErrorReasonUnspecified
+	// ActivityRetryErrorReasonRetryable means the error is retryable and the
+	// activity will be (or was) retried according to the retry policy.
+	ActivityRetryErrorReasonRetryable = internal.ActivityRetryErrorReasonRetryable
+	// ActivityRetryErrorReasonNonRetryable means the error is marked
+	// non-retryable (e.g. *ApplicationError with NonRetryable set, or an error
+	// type listed in RetryPolicy.NonRetryableErrorTypes).
+	ActivityRetryErrorReasonNonRetryable = internal.ActivityRetryErrorReasonNonRetryable
+	// ActivityRetryErrorReasonCanceled means the activity was canceled.
+	ActivityRetryErrorReasonCanceled = internal.ActivityRetryErrorReasonCanceled
+	// ActivityRetryErrorReasonTimeout means the activity timed out.
+	ActivityRetryErrorReasonTimeout = internal.ActivityRetryErrorReasonTimeout
+	// ActivityRetryErrorReasonMaxAttemptsReached means the retry policy's
+	// MaximumAttempts limit was reached.
+	ActivityRetryErrorReasonMaxAttemptsReached = internal.ActivityRetryErrorReasonMaxAttemptsReached
+	// ActivityRetryErrorReasonRetryPolicyNotSet means no retry policy was
+	// configured for the activity.
+	ActivityRetryErrorReasonRetryPolicyNotSet = internal.ActivityRetryErrorReasonRetryPolicyNotSet
 )

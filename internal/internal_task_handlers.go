@@ -1349,7 +1349,16 @@ func (w *workflowExecutionContextImpl) applyWorkflowPanicPolicy(workflowTask *wo
 }
 
 func (w *workflowExecutionContextImpl) retryLocalActivity(lar *localActivityResult) bool {
-	if lar.task.retryPolicy == nil || lar.err == nil || IsCanceledError(lar.err) {
+	if lar.err == nil {
+		return false
+	}
+
+	// Build a stable, non-sensitive summary of the retry error so callers can
+	// inspect the attempt number and final reason category without exposing
+	// sensitive error details.
+	lar.summary = newActivityRetryErrorSummary(lar.task.attempt, lar.err, lar.task.retryPolicy)
+
+	if lar.task.retryPolicy == nil || IsCanceledError(lar.err) {
 		return false
 	}
 
@@ -1422,6 +1431,41 @@ func getRetryBackoffWithNowTime(p *RetryPolicy, attempt int32, err error, now, e
 	}
 
 	return backoffInterval
+}
+
+// newActivityRetryErrorSummary builds a stable, non-sensitive summary of an
+// activity retry error from the attempt number, the error, and the retry
+// policy. The reason category is derived from the error type and retry
+// decision, never from the error message or details, so sensitive information
+// cannot leak through the summary.
+func newActivityRetryErrorSummary(attempt int32, err error, retryPolicy *RetryPolicy) ActivityRetryErrorSummary {
+	summary := ActivityRetryErrorSummary{Attempt: attempt}
+	if err == nil {
+		return summary
+	}
+	if IsCanceledError(err) {
+		summary.Reason = ActivityRetryErrorReasonCanceled
+		return summary
+	}
+	if retryPolicy == nil {
+		summary.Reason = ActivityRetryErrorReasonRetryPolicyNotSet
+		return summary
+	}
+	if !IsRetryable(err, retryPolicy.NonRetryableErrorTypes) {
+		summary.Reason = ActivityRetryErrorReasonNonRetryable
+		return summary
+	}
+	if retryPolicy.MaximumAttempts > 0 && attempt >= retryPolicy.MaximumAttempts {
+		summary.Reason = ActivityRetryErrorReasonMaxAttemptsReached
+		return summary
+	}
+	var timeoutErr *TimeoutError
+	if errors.As(err, &timeoutErr) {
+		summary.Reason = ActivityRetryErrorReasonTimeout
+		return summary
+	}
+	summary.Reason = ActivityRetryErrorReasonRetryable
+	return summary
 }
 
 func (w *workflowExecutionContextImpl) CompleteWorkflowTask(workflowTask *workflowTask, waitLocalActivities bool) *workflowTaskCompletion {

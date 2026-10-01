@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -2787,4 +2788,163 @@ func TestHistoryIteratorMaxEventID(t *testing.T) {
 	_, err = historyIterator.GetNextPage()
 	require.Error(t, err)
 
+}
+
+// TestActivityRetryErrorSummary verifies that the activity retry error summary
+// is built correctly for retryable, non-retryable, and cancellation errors, and
+// that the reason category matches the existing retry decision. It also verifies
+// that sensitive error details (message, details) do not leak into the summary.
+func TestActivityRetryErrorSummary(t *testing.T) {
+	require := require.New(t)
+
+	retryPolicy := &RetryPolicy{
+		InitialInterval:    time.Second,
+		BackoffCoefficient: 2.0,
+		MaximumInterval:    time.Minute,
+		MaximumAttempts:    5,
+	}
+
+	tests := []struct {
+		name           string
+		attempt        int32
+		err            error
+		retryPolicy    *RetryPolicy
+		wantReason     ActivityRetryErrorReason
+		wantRetryable  bool // existing retry decision
+	}{
+		{
+			name:          "retryable application error",
+			attempt:       1,
+			err:           NewApplicationError("sensitive message", "RetryableErr", false, nil, "sensitive detail"),
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonRetryable,
+			wantRetryable: true,
+		},
+		{
+			name:          "non-retryable application error",
+			attempt:       1,
+			err:           NewApplicationError("sensitive message", "NonRetryableErr", true, nil, "sensitive detail"),
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonNonRetryable,
+			wantRetryable: false,
+		},
+		{
+			name:          "cancellation error",
+			attempt:       1,
+			err:           NewCanceledError("sensitive detail"),
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonCanceled,
+			wantRetryable: false,
+		},
+		{
+			name:          "timeout error",
+			attempt:       1,
+			err:           NewTimeoutError("sensitive timeout", enumspb.TIMEOUT_TYPE_START_TO_CLOSE, nil),
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonTimeout,
+			wantRetryable: true,
+		},
+		{
+			name:          "max attempts reached",
+			attempt:       5,
+			err:           NewApplicationError("sensitive message", "RetryableErr", false, nil),
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonMaxAttemptsReached,
+			wantRetryable: false,
+		},
+		{
+			name:          "retry policy not set",
+			attempt:       1,
+			err:           NewApplicationError("sensitive message", "RetryableErr", false, nil),
+			retryPolicy:   nil,
+			wantReason:    ActivityRetryErrorReasonRetryPolicyNotSet,
+			wantRetryable: false,
+		},
+		{
+			name:          "nil error",
+			attempt:       1,
+			err:           nil,
+			retryPolicy:   retryPolicy,
+			wantReason:    ActivityRetryErrorReasonUnspecified,
+			wantRetryable: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			summary := newActivityRetryErrorSummary(tt.attempt, tt.err, tt.retryPolicy)
+			require.Equal(tt.attempt, summary.Attempt, "attempt number should match")
+			require.Equal(tt.wantReason, summary.Reason, "reason category should match")
+
+			// Verify the reason matches the existing retry decision.
+			// The retry decision is made by retryLocalActivity, which:
+			//   - returns false (no retry) when retryPolicy is nil, err is nil,
+			//     or the error is canceled;
+			//   - otherwise calls getRetryBackoffWithNowTime, which returns
+			//     noRetryBackoff when the error is non-retryable or max attempts
+			//     is reached, and a positive backoff when the error is retryable.
+			if tt.err != nil {
+				switch tt.wantReason {
+				case ActivityRetryErrorReasonCanceled, ActivityRetryErrorReasonRetryPolicyNotSet:
+					// These always result in no retry by retryLocalActivity.
+					require.False(tt.wantRetryable)
+				default:
+					backoff := getRetryBackoffWithNowTime(tt.retryPolicy, tt.attempt, tt.err, time.Now(), time.Time{})
+					gotRetryable := backoff != noRetryBackoff
+					require.Equal(tt.wantRetryable, gotRetryable, "retry decision should match getRetryBackoffWithNowTime")
+				}
+			}
+
+			// Verify sensitive details do not leak into the summary.
+			// The summary only contains Attempt (int32) and Reason (enum), so
+			// there is no place for error messages or details to hide.
+			require.NotContains(fmt.Sprintf("%v", summary), "sensitive")
+		})
+	}
+}
+
+// TestActivityRetryErrorSummary_BackwardCompatibleDecoding verifies that
+// historical event markers written without the summary field still decode
+// correctly (to the zero value), and that markers written with the summary
+// field round-trip correctly.
+func TestActivityRetryErrorSummary_BackwardCompatibleDecoding(t *testing.T) {
+	require := require.New(t)
+
+	// Simulate an old marker written before the summary field was added.
+	// The JSON payload contains only the original fields.
+	oldMarkerJSON := `{"ActivityID":"activity-1","ActivityType":"TestActivity","ReplayTime":"2024-01-01T00:00:00Z","Attempt":3,"Backoff":1000000000}`
+
+	var oldMarker localActivityMarkerData
+	err := json.Unmarshal([]byte(oldMarkerJSON), &oldMarker)
+	require.NoError(err)
+	require.Equal("activity-1", oldMarker.ActivityID)
+	require.Equal("TestActivity", oldMarker.ActivityType)
+	require.Equal(int32(3), oldMarker.Attempt)
+	require.Equal(time.Second, oldMarker.Backoff)
+	// Old history without the summary field decodes to the zero value.
+	require.Equal(ActivityRetryErrorSummary{}, oldMarker.Summary)
+	require.Equal(ActivityRetryErrorReasonUnspecified, oldMarker.Summary.Reason)
+
+	// Simulate a new marker written with the summary field.
+	newMarker := localActivityMarkerData{
+		ActivityID:   "activity-2",
+		ActivityType: "TestActivity",
+		Attempt:      2,
+		Backoff:      2 * time.Second,
+		Summary: ActivityRetryErrorSummary{
+			Attempt: 2,
+			Reason:  ActivityRetryErrorReasonNonRetryable,
+		},
+	}
+	newMarkerJSON, err := json.Marshal(newMarker)
+	require.NoError(err)
+
+	var decodedMarker localActivityMarkerData
+	err = json.Unmarshal(newMarkerJSON, &decodedMarker)
+	require.NoError(err)
+	require.Equal(newMarker.ActivityID, decodedMarker.ActivityID)
+	require.Equal(newMarker.Attempt, decodedMarker.Attempt)
+	require.Equal(newMarker.Backoff, decodedMarker.Backoff)
+	require.Equal(newMarker.Summary, decodedMarker.Summary)
+	require.Equal(ActivityRetryErrorReasonNonRetryable, decodedMarker.Summary.Reason)
 }

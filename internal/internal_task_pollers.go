@@ -226,6 +226,9 @@ type (
 		err     error
 		task    *localActivityTask
 		backoff time.Duration
+		// summary is a stable, non-sensitive summary of the retry error,
+		// populated when the activity ends with an error.
+		summary ActivityRetryErrorSummary
 	}
 
 	localActivityTunnel struct {

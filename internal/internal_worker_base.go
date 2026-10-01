@@ -60,6 +60,10 @@ type (
 		Result  *commonpb.Payloads
 		Attempt int32
 		Backoff time.Duration
+		// Summary is a stable, non-sensitive summary of the retry error.
+		// It contains the attempt number and final reason category, with
+		// no error message or details, so it is safe to log or expose.
+		Summary ActivityRetryErrorSummary
 	}
 
 	LocalActivityMarkerParams struct {

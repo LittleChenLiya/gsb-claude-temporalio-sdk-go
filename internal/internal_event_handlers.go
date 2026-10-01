@@ -206,6 +206,12 @@ type (
 		ReplayTime   time.Time
 		Attempt      int32         // record attempt, starting from 1.
 		Backoff      time.Duration // retry backoff duration.
+		// Summary is a stable, non-sensitive summary of the retry error.
+		// It is safe to include in history because it contains only the
+		// attempt number and reason category, no error message or details.
+		// This field is backward compatible: older history without it
+		// decodes to the zero value.
+		Summary ActivityRetryErrorSummary
 	}
 )
 
@@ -1834,6 +1840,7 @@ func (weh *workflowExecutionEventHandlerImpl) handleLocalActivityMarker(details 
 			lar.Attempt = lamd.Attempt
 			lar.Backoff = lamd.Backoff
 			lar.Err = la.params.FailureConverter.FailureToError(failure)
+			lar.Summary = lamd.Summary
 		} else {
 			// Result might not be there if local activity doesn't have return value.
 			lar.Result = details[localActivityResultName]
@@ -1859,6 +1866,7 @@ func (weh *workflowExecutionEventHandlerImpl) ProcessLocalActivityResult(lar *lo
 		ActivityType: lar.task.params.ActivityType,
 		ReplayTime:   weh.currentReplayTime.Add(time.Since(weh.currentLocalTime)),
 		Attempt:      lar.task.attempt,
+		Summary:      lar.summary,
 	}
 	if lar.err != nil {
 		lamd.Backoff = lar.backoff
