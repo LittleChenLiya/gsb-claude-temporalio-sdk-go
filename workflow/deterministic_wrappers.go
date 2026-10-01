@@ -195,6 +195,15 @@ func NewTimerWithOptions(ctx Context, d time.Duration, options TimerOptions) Fut
 	return internal.NewTimerWithOptions(ctx, d, options)
 }
 
+// GetTimerRemaining returns the remaining time until the timer fires.
+// Returns 0 if the timer has already fired or been canceled.
+// The remaining time is computed using workflow time (Now()) to ensure determinism during replay.
+//
+// This is a read-only query and does not modify any workflow state.
+func GetTimerRemaining(ctx Context, future Future) time.Duration {
+	return internal.GetTimerRemaining(ctx, future)
+}
+
 // Sleep pauses the current workflow for at least the duration d. A negative or zero duration causes Sleep to return
 // immediately. Workflow code must use this Sleep() to sleep, instead of Go's timer.Sleep().
 // You can cancel the pending sleep by canceling the Context (using the context from workflow.WithCancel(ctx)).

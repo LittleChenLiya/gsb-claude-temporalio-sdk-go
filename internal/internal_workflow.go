@@ -57,6 +57,7 @@ type (
 		ready   bool
 		channel *channelImpl
 		chained []asyncFuture // Futures that are chained to this one
+		timerID *TimerID      // Timer ID if this future is associated with a timer
 	}
 
 	// Implements WaitGroup interface

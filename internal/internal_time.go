@@ -27,6 +27,11 @@ type (
 		// to complete, instead invokes the ResultHandler with TimerCanceledError
 		// If the timer is not started then it is a no-operation.
 		RequestCancelTimer(timerID TimerID)
+
+		// GetTimerRemaining - Returns the remaining time until the timer fires.
+		// Returns 0 if the timer has already fired or been canceled.
+		// The remaining time is computed using workflow time (Now()) to ensure determinism during replay.
+		GetTimerRemaining(timerID TimerID) time.Duration
 	}
 )
 

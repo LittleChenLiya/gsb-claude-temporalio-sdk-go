@@ -51,6 +51,7 @@ type (
 	scheduledTimer struct {
 		callback ResultHandler
 		handled  bool
+		fireTime time.Time
 	}
 
 	scheduledActivity struct {
@@ -929,7 +930,7 @@ func (wc *workflowEnvironmentImpl) NewTimer(d time.Duration, options TimerOption
 	startTimerAttr.StartToFireTimeout = durationpb.New(d)
 
 	command := wc.commandsHelper.startTimer(startTimerAttr, options, wc.GetDataConverter())
-	command.setData(&scheduledTimer{callback: callback})
+	command.setData(&scheduledTimer{callback: callback, fireTime: wc.Now().Add(d)})
 
 	wc.logger.Debug("NewTimer",
 		tagTimerID, startTimerAttr.GetTimerId(),
@@ -948,6 +949,19 @@ func (wc *workflowEnvironmentImpl) RequestCancelTimer(timerID TimerID) {
 		timer.handle(nil, ErrCanceled)
 	}
 	wc.logger.Debug("RequestCancelTimer", tagTimerID, timerID)
+}
+
+func (wc *workflowEnvironmentImpl) GetTimerRemaining(timerID TimerID) time.Duration {
+	command := wc.commandsHelper.getCommand(makeCommandID(commandTypeTimer, timerID.id))
+	timer := command.getData().(*scheduledTimer)
+	if timer == nil || timer.handled {
+		return 0
+	}
+	remaining := timer.fireTime.Sub(wc.Now())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 func validateVersion(changeID string, version, minSupported, maxSupported Version) {

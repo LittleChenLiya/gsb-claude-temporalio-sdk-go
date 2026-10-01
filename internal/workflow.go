@@ -1754,6 +1754,24 @@ func (wc *workflowEnvironmentInterceptor) NewTimer(ctx Context, d time.Duration)
 	return wc.NewTimerWithOptions(ctx, d, TimerOptions{})
 }
 
+// GetTimerRemaining returns the remaining time until the timer fires.
+// Returns 0 if the timer has already fired or been canceled.
+// The remaining time is computed using workflow time (Now()) to ensure determinism during replay.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.GetTimerRemaining]
+func GetTimerRemaining(ctx Context, future Future) time.Duration {
+	i := getWorkflowOutboundInterceptor(ctx)
+	return i.GetTimerRemaining(ctx, future)
+}
+
+func (wc *workflowEnvironmentInterceptor) GetTimerRemaining(ctx Context, future Future) time.Duration {
+	f, ok := future.(*futureImpl)
+	if !ok || f.timerID == nil {
+		return 0
+	}
+	return wc.env.GetTimerRemaining(*f.timerID)
+}
+
 func (wc *workflowEnvironmentInterceptor) NewTimerWithOptions(
 	ctx Context,
 	d time.Duration,
@@ -1774,6 +1792,12 @@ func (wc *workflowEnvironmentInterceptor) NewTimerWithOptions(
 			ctxDone.removeReceiveCallback(cancellationCallback)
 		}
 	})
+
+	if timerID != nil {
+		if f, ok := future.(*futureImpl); ok {
+			f.timerID = timerID
+		}
+	}
 
 	if timerID != nil && cancellable {
 		cancellationCallback.fn = func(v any, more bool) bool {

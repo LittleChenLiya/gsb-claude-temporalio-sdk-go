@@ -289,6 +289,11 @@ func (w *WorkflowOutboundInterceptorBase) NewTimerWithOptions(
 	return w.Next.NewTimerWithOptions(ctx, d, options)
 }
 
+// GetTimerRemaining implements WorkflowOutboundInterceptor.GetTimerRemaining.
+func (w *WorkflowOutboundInterceptorBase) GetTimerRemaining(ctx Context, future Future) time.Duration {
+	return w.Next.GetTimerRemaining(ctx, future)
+}
+
 // Sleep implements WorkflowOutboundInterceptor.Sleep.
 func (w *WorkflowOutboundInterceptorBase) Sleep(ctx Context, d time.Duration) (err error) {
 	return w.Next.Sleep(ctx, d)

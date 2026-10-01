@@ -268,6 +268,9 @@ type WorkflowOutboundInterceptor interface {
 	// NOTE: Experimental
 	NewTimerWithOptions(ctx Context, d time.Duration, options TimerOptions) Future
 
+	// GetTimerRemaining intercepts workflow.GetTimerRemaining.
+	GetTimerRemaining(ctx Context, future Future) time.Duration
+
 	// Sleep intercepts workflow.Sleep.
 	Sleep(ctx Context, d time.Duration) (err error)
 

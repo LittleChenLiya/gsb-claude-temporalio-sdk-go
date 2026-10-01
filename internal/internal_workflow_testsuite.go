@@ -1291,6 +1291,20 @@ func (env *testWorkflowEnvironmentImpl) RequestCancelTimer(timerID TimerID) {
 	}, true)
 }
 
+// GetTimerRemaining returns the remaining time until the timer fires.
+// Returns 0 if the timer has already fired or been canceled.
+func (env *testWorkflowEnvironmentImpl) GetTimerRemaining(timerID TimerID) time.Duration {
+	timerHandle, ok := env.timers[timerID.id]
+	if !ok {
+		return 0
+	}
+	remaining := timerHandle.mockTimeToFire.Sub(env.mockClock.Now())
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 func (env *testWorkflowEnvironmentImpl) Complete(result *commonpb.Payloads, err error) {
 	if env.isWorkflowCompleted {
 		env.logger.Debug("Workflow already completed.")
