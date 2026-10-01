@@ -230,6 +230,12 @@ type (
 	// Options is used to configure a worker instance.
 	Options = internal.WorkerOptions
 
+	// WorkerDrainReport summarizes how a worker's in-flight tasks ended during
+	// a graceful shutdown drain. Counts are mutually exclusive and add up to
+	// the total number of tasks the worker was processing when Stop was
+	// initiated.
+	WorkerDrainReport = internal.WorkerDrainReport
+
 	// PollerBehavior is used to configure the behavior of the poller.
 	PollerBehavior = internal.PollerBehavior
 

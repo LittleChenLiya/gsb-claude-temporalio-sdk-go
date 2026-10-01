@@ -257,6 +257,28 @@ type (
 
 		noRepoll atomic.Bool
 		pollerWG sync.WaitGroup
+
+		// drainTracker records how in-flight tasks ended during a graceful
+		// shutdown. It is shared with the task processors so outcomes are
+		// counted exactly once, matching the actual ProcessTask callbacks.
+		drainTracker *drainTracker
+	}
+
+	// drainTracker is a concurrency-safe counter for task outcomes during a
+	// worker shutdown drain. It distinguishes tasks that completed before the
+	// drain window closed from tasks that were canceled or still running when
+	// the WorkerStopTimeout elapsed.
+	//
+	// A generation counter prevents double counting: when the hard stop fires,
+	// the generation is bumped. Tasks that finish afterwards see a different
+	// generation and are not reclassified, while tasks that were in flight at
+	// the hard-stop instant are counted as timed out.
+	drainTracker struct {
+		inFlight  atomic.Int64
+		completed atomic.Int64
+		canceled  atomic.Int64
+		timedOut  atomic.Int64
+		stopGen   atomic.Int64
 	}
 
 	eagerOrPolledTask interface {
@@ -394,6 +416,7 @@ func newBaseWorker(
 		taskLimiterContext:       taskLimiterCtx,
 		taskLimiterContextCancel: taskLimiterCancel,
 		sessionTokenBucket:       options.sessionTokenBucket,
+		drainTracker:             newDrainTracker(),
 	}
 	// Set secondary retrier as resource exhausted
 	bw.retrier.SetSecondaryRetryPolicy(pollResourceExhaustedRetryPolicy)
@@ -403,6 +426,56 @@ func newBaseWorker(
 	bw.validatePollers(options.taskPollers)
 
 	return bw
+}
+
+// newDrainTracker creates a drain tracker for a base worker.
+func newDrainTracker() *drainTracker {
+	return &drainTracker{}
+}
+
+// taskStarted records that a task has begun processing. It returns the drain
+// generation at start time so the outcome can be classified correctly even if
+// the hard stop fires while the task is running.
+func (dt *drainTracker) taskStarted() int64 {
+	dt.inFlight.Add(1)
+	return dt.stopGen.Load()
+}
+
+// taskCompleted records that a task finished and reported a result. The task
+// is only counted as completed if it was not already claimed by a hard stop.
+func (dt *drainTracker) taskCompleted(gen int64) {
+	dt.inFlight.Add(-1)
+	if gen == dt.stopGen.Load() {
+		dt.completed.Add(1)
+	}
+}
+
+// taskCanceled records that a task was interrupted by the shutdown. The task
+// is only counted as canceled if it was not already claimed by a hard stop.
+func (dt *drainTracker) taskCanceled(gen int64) {
+	dt.inFlight.Add(-1)
+	if gen == dt.stopGen.Load() {
+		dt.canceled.Add(1)
+	}
+}
+
+// hardStop is called when the graceful stop timeout elapses. It bumps the
+// generation so tasks that finish afterwards are not double counted, and
+// classifies every task still in flight as timed out.
+func (dt *drainTracker) hardStop() {
+	dt.stopGen.Add(1)
+	if remaining := dt.inFlight.Load(); remaining > 0 {
+		dt.timedOut.Add(remaining)
+	}
+}
+
+// snapshot returns a point-in-time view of the drain counts.
+func (dt *drainTracker) snapshot() WorkerDrainReport {
+	return WorkerDrainReport{
+		Completed: dt.completed.Load(),
+		Canceled:  dt.canceled.Load(),
+		TimedOut:  dt.timedOut.Load(),
+	}
 }
 
 // initializeTaskPollers must be called at most once and before Start().
@@ -693,6 +766,8 @@ func (bw *baseWorker) processTaskAsync(eagerOrPolled eagerOrPolledTask) {
 					"PanicStack", st)
 			}
 		}()
+
+		gen := bw.drainTracker.taskStarted()
 		err := bw.options.taskProcessor.ProcessTask(task)
 		if err != nil {
 			if isClientSideError(err) {
@@ -700,6 +775,15 @@ func (bw *baseWorker) processTaskAsync(eagerOrPolled eagerOrPolledTask) {
 			} else {
 				bw.logger.Info("Task processing failed with error", tagError, err)
 			}
+		}
+		// Classify the outcome based on what the task processor actually
+		// returned. errStop and context.Canceled mean the shutdown interrupted
+		// the task before it could report a result; anything else means the task
+		// finished processing (successfully or with an error) and reported back.
+		if errors.Is(err, errStop) || errors.Is(err, context.Canceled) {
+			bw.drainTracker.taskCanceled(gen)
+		} else {
+			bw.drainTracker.taskCompleted(gen)
 		}
 	})
 }
@@ -895,6 +979,9 @@ func (bw *baseWorker) Stop() {
 		traceLog(func() {
 			bw.logger.Info("Worker graceful stop timed out.", "Stop timeout", bw.options.stopTimeout)
 		})
+		// The graceful stop window elapsed. Classify every task still in
+		// flight as timed out so the drain report reflects the hard stop.
+		bw.drainTracker.hardStop()
 	}
 	bw.taskLimiterContextCancel()
 
@@ -904,6 +991,11 @@ func (bw *baseWorker) Stop() {
 	}
 
 	bw.isWorkerStarted = false
+}
+
+// drainReport returns a point-in-time view of this worker's drain counts.
+func (bw *baseWorker) drainReport() WorkerDrainReport {
+	return bw.drainTracker.snapshot()
 }
 
 func (bw *baseWorker) stopPolling() {

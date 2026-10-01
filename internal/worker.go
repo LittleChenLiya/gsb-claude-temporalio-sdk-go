@@ -13,6 +13,27 @@ var (
 	_ PollerBehavior = (*pollerBehaviorAutoscaling)(nil)
 )
 
+// WorkerDrainReport summarizes how a worker's in-flight tasks ended during a
+// graceful shutdown drain. Counts are mutually exclusive and add up to the
+// total number of tasks the worker was processing when Stop was initiated:
+//
+//   - Completed: tasks that finished processing and reported a result before
+//     the drain window closed.
+//   - Canceled: tasks that were interrupted by the shutdown (the worker stop
+//     channel closed) and did not report a result.
+//   - TimedOut: tasks that were still running when the configured
+//     WorkerStopTimeout elapsed and the worker was hard-terminated.
+//
+// The report is delivered to the OnWorkerDrainReport callback after Stop
+// returns. Repeated calls to Stop do not reset or re-emit the report.
+//
+// Exposed as: [go.temporal.io/sdk/worker.WorkerDrainReport]
+type WorkerDrainReport struct {
+	Completed int64
+	Canceled  int64
+	TimedOut  int64
+}
+
 type (
 	pollerBehaviorSimpleMaximum struct {
 		// maximumNumberOfPollers is the maximum number of pollers the worker is allowed to start.
@@ -357,6 +378,15 @@ type (
 		// Optional: Callback invoked on fatal error. Immediately after this
 		// returns, Worker.Stop() will be called.
 		OnFatalError func(error)
+
+		// Optional: Callback invoked after the worker has drained in-flight
+		// tasks during Stop. The report summarizes how many tasks completed,
+		// were canceled, or were still running when the WorkerStopTimeout
+		// elapsed. The callback is invoked at most once, even if Stop is
+		// called multiple times.
+		//
+		// NOTE: Experimental
+		OnWorkerDrainReport func(WorkerDrainReport)
 
 		// Optional: Disable eager activities. If set to true, activities will not
 		// be requested to execute eagerly from the same workflow regardless of

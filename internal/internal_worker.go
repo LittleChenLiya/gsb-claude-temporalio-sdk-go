@@ -1331,6 +1331,13 @@ type AggregatedWorker struct {
 	// pendingEnvironment is attached to every heartbeat (periodic and shutdown) until the server
 	// accepts one, at which point heartbeatSuccess clears it.
 	pendingEnvironment atomic.Pointer[workerpb.EnvironmentInfo]
+
+	// drainReportCallback, when set, is invoked exactly once after the worker
+	// has drained in-flight tasks during Stop.
+	drainReportCallback func(WorkerDrainReport)
+	// drainReportOnce ensures the drain report is emitted at most once, even
+	// if Stop is called multiple times.
+	drainReportOnce sync.Once
 }
 
 // RegisterWorkflow registers workflow implementation with the AggregatedWorker
@@ -1717,7 +1724,55 @@ func (aw *AggregatedWorker) Stop() {
 
 	aw.unregisterHeartbeatWorker()
 
+	aw.emitDrainReport()
+
 	aw.logger.Info("Stopped Worker")
+}
+
+// emitDrainReport aggregates the drain counts from all child workers and
+// invokes the OnWorkerDrainReport callback exactly once.
+func (aw *AggregatedWorker) emitDrainReport() {
+	if aw.drainReportCallback == nil {
+		return
+	}
+	aw.drainReportOnce.Do(func() {
+		var report WorkerDrainReport
+		if !util.IsInterfaceNil(aw.workflowWorker) {
+			r := aw.workflowWorker.worker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+			// Local activities run on a separate base worker but are part of
+			// the workflow worker's drain.
+			r = aw.workflowWorker.localActivityWorker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+		}
+		if !util.IsInterfaceNil(aw.activityWorker) {
+			r := aw.activityWorker.worker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+		}
+		if !util.IsInterfaceNil(aw.sessionWorker) {
+			r := aw.sessionWorker.creationWorker.worker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+			r = aw.sessionWorker.activityWorker.worker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+		}
+		if !util.IsInterfaceNil(aw.nexusWorker) {
+			r := aw.nexusWorker.worker.drainReport()
+			report.Completed += r.Completed
+			report.Canceled += r.Canceled
+			report.TimedOut += r.TimedOut
+		}
+		aw.drainReportCallback(report)
+	})
 }
 
 func (aw *AggregatedWorker) registerHeartbeatWorker() error {
@@ -2712,6 +2767,7 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 		heartbeatMetrics:             heartbeatMetrics,
 		heartbeatCallback:            heartbeatCallback,
 		workerPollCompleteOnShutdown: workerPollCompleteOnShutdown,
+		drainReportCallback:          options.OnWorkerDrainReport,
 	}
 	if client.heartbeatManager != nil {
 		aw.pendingEnvironment.Store(client.heartbeatManager.environmentInfo)
