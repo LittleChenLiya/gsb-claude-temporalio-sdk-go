@@ -26,6 +26,11 @@ to docs, or any other relevant information.
   `SetWorkerOptions(worker.Options{Plugins: ...})`, which were previously ignored. Once plugins are
   set, `SetWorkerOptions` may not be called again on that environment, and what a plugin registers
   in `StartWorker` is undone at `StopWorker`.
+- `client.StartWorkflowOptions` now accepts an optional `IdempotencyKey`. When set, the SDK derives
+  a stable request identifier from the key and reuses it across local retries of the same start
+  call, so the server can deduplicate the start. Concurrent calls that carry the same key are
+  merged into a single request; calls with different keys are not merged. Once a call finishes or
+  is cancelled, its pending state is dropped so a later retry issues a fresh request.
 
 ### Changed
 

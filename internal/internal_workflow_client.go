@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -97,6 +98,12 @@ type (
 		storageParams        extstore.StorageParameters
 		storageDriverTypes   []string
 		payloadWarningLimits payloadLimits
+
+		// startIdempotency merges concurrent start calls that carry the same
+		// client-side idempotency key so that only a single start request is
+		// issued for them. Entries are dropped once the call finishes or is
+		// cancelled, so a later retry with the same key issues a fresh request.
+		startIdempotency *singleflight.Group
 	}
 
 	// namespaceData holds cached namespace capabilities and limits.
@@ -2102,6 +2109,32 @@ func createStartWorkflowInput(
 	}, nil
 }
 
+// idempotencyKeyNamespace is a fixed UUID namespace used to derive stable
+// request identifiers from client-side idempotency keys.
+var idempotencyKeyNamespace = uuid.MustParse("6ba7b811-9dad-11d1-80b4-00c04fd430c8") // uuid.NameSpaceURL
+
+// idempotencyKeyToRequestID derives a deterministic request identifier from a
+// client-side idempotency key. Two calls with the same key produce the same
+// identifier; calls with different keys produce different identifiers, so the
+// server can deduplicate retries without merging unrelated starts.
+func idempotencyKeyToRequestID(key string) string {
+	return uuid.NewSHA1(idempotencyKeyNamespace, []byte("go.temporal.io/sdk/start-workflow-idempotency/"+key)).String()
+}
+
+// startRequestID returns the request identifier to attach to a start request
+// for the given options. An SDK-provided request ID takes precedence, then a
+// deterministic ID derived from the client-side idempotency key, then a random
+// UUID.
+func startRequestID(options *StartWorkflowOptions) string {
+	if options.requestID != "" {
+		return options.requestID
+	}
+	if options.IdempotencyKey != "" {
+		return idempotencyKeyToRequestID(options.IdempotencyKey)
+	}
+	return uuid.NewString()
+}
+
 func (w *workflowClientInterceptor) createStartWorkflowRequest(
 	ctx context.Context,
 	in *ClientExecuteWorkflowInput,
@@ -2177,11 +2210,7 @@ func (w *workflowClientInterceptor) createStartWorkflowRequest(
 		return nil, err
 	}
 
-	if in.Options.requestID != "" {
-		startRequest.RequestId = in.Options.requestID
-	} else {
-		startRequest.RequestId = uuid.NewString()
-	}
+	startRequest.RequestId = startRequestID(in.Options)
 
 	if in.Options.StartDelay != 0 {
 		startRequest.WorkflowStartDelay = durationpb.New(in.Options.StartDelay)
@@ -2191,6 +2220,25 @@ func (w *workflowClientInterceptor) createStartWorkflowRequest(
 }
 
 func (w *workflowClientInterceptor) ExecuteWorkflow(
+	ctx context.Context,
+	in *ClientExecuteWorkflowInput,
+) (WorkflowRun, error) {
+	if in.Options.IdempotencyKey == "" {
+		return w.executeWorkflowStart(ctx, in)
+	}
+	// Merge concurrent start calls that share the same client-side idempotency
+	// key into a single request. The group drops the entry once the call finishes
+	// or is cancelled, so a later retry with the same key issues a fresh request.
+	v, err, _ := w.client.startIdempotency.Do(in.Options.IdempotencyKey, func() (any, error) {
+		return w.executeWorkflowStart(ctx, in)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(WorkflowRun), nil
+}
+
+func (w *workflowClientInterceptor) executeWorkflowStart(
 	ctx context.Context,
 	in *ClientExecuteWorkflowInput,
 ) (WorkflowRun, error) {
@@ -2589,7 +2637,7 @@ func (w *workflowClientInterceptor) SignalWithStartWorkflow(
 
 	signalWithStartRequest := &workflowservice.SignalWithStartWorkflowExecutionRequest{
 		Namespace:                w.client.namespace,
-		RequestId:                uuid.NewString(),
+		RequestId:                startRequestID(in.Options),
 		WorkflowId:               in.Options.ID,
 		WorkflowType:             &commonpb.WorkflowType{Name: in.WorkflowType},
 		TaskQueue:                &taskqueuepb.TaskQueue{Name: in.Options.TaskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},

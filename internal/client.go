@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -1306,6 +1307,25 @@ type (
 		// task processing when tasks are backed up in a queue.
 		Priority Priority
 
+		// IdempotencyKey - Optional client-side idempotency key for this start call.
+		//
+		// When set, the SDK derives a stable request identifier from this key and
+		// attaches it to the StartWorkflowExecution request. The identifier stays
+		// the same across local retries of the same call, so the server can
+		// deduplicate the start instead of creating a second workflow execution.
+		// Concurrent start calls that carry the same key are merged into a single
+		// request and share the result; calls with different keys are never merged.
+		// Once a call finishes or is cancelled, its pending state is dropped, so a
+		// later retry with the same key issues a fresh request.
+		//
+		// The key must uniquely identify the intended workflow start: two calls
+		// with the same key are considered the same operation even if their other
+		// options differ.
+		//
+		// Optional: defaults to none, in which case a random request identifier is
+		// generated for every call.
+		IdempotencyKey string
+
 		// responseInfo - Optional pointer to store information of StartWorkflowExecution response.
 		// Only settable by the SDK - e.g. [temporalnexus.workflowRunOperation].
 		responseInfo *startWorkflowResponseInfo
@@ -1735,6 +1755,7 @@ func NewServiceClient(workflowServiceClient workflowservice.WorkflowServiceClien
 		storageParams:           storageParams,
 		storageDriverTypes:      storageDriverTypes,
 		payloadWarningLimits:    payloadWarningLimits,
+		startIdempotency:        &singleflight.Group{},
 	}
 
 	if heartbeatInterval > 0 {
