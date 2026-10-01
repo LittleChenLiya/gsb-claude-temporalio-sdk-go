@@ -251,6 +251,11 @@ type (
 
 	// ReplayWorkflowHistoryOptions are options for replaying a workflow.
 	ReplayWorkflowHistoryOptions = internal.ReplayWorkflowHistoryOptions
+
+	// StopDrainReport summarizes how in-flight tasks settled while a worker
+	// drained during a graceful Stop(). It is delivered once to
+	// Options.OnWorkerStopDrainReport.
+	StopDrainReport = internal.WorkerStopDrainReport
 )
 
 var _ WorkflowRegistry = (WorkflowReplayer)(nil)

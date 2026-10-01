@@ -106,6 +106,9 @@ type (
 		// workflow worker stops, causing the tunnel to stop accepting local activity work.
 		localActivityStopC chan struct{}
 		stickyUUID         string // Used for ShutdownWorker call
+		// stopOnce ensures Stop() is idempotent: the stop channels are closed
+		// exactly once even if Stop() is called concurrently or repeatedly.
+		stopOnce sync.Once
 	}
 
 	// ActivityWorker wraps the code for hosting activity types.
@@ -119,6 +122,11 @@ type (
 		// stopC is created by newActivityWorker, exposed through WorkerStopChannel
 		// to activity task polling/handling, and closed by activityWorker.Stop().
 		stopC chan struct{}
+		// drainTracker counts how in-flight activity tasks settle during the
+		// graceful stop drain. The final report is available after Stop().
+		drainTracker *workerDrainTracker
+		// stopOnce makes Stop() idempotent so the stop channel is closed once.
+		stopOnce sync.Once
 	}
 
 	// sessionWorker wraps the code for hosting session creation, completion and
@@ -267,6 +275,11 @@ type (
 		payloadVisitorConcurrency int
 
 		setErrorLimits func(*payloadLimits)
+
+		// stopDrainTracker counts how in-flight tasks settle during the graceful
+		// stop drain. It is optional and currently populated only for the
+		// (remote) activity worker.
+		stopDrainTracker *workerDrainTracker
 	}
 
 	// HistoryJSONOptions are options for HistoryFromJSON.
@@ -474,13 +487,17 @@ func (ww *workflowWorker) Start() error {
 	return nil // TODO: propagate error
 }
 
-// Stop the worker.
+// Stop the worker. Safe to call concurrently or repeatedly: only the first
+// call closes the stop channels and drains; later calls return immediately so
+// the drain report is never counted twice.
 func (ww *workflowWorker) Stop() {
-	close(ww.stopC)
-	// TODO: remove the stop methods in favor of the workerStopChannel
-	ww.worker.Stop()
-	close(ww.localActivityStopC)
-	ww.localActivityWorker.Stop()
+	ww.stopOnce.Do(func() {
+		close(ww.stopC)
+		// TODO: remove the stop methods in favor of the workerStopChannel
+		ww.worker.Stop()
+		close(ww.localActivityStopC)
+		ww.localActivityWorker.Stop()
+	})
 }
 
 // buildWorkflowScalableTaskPollers builds the set of workflow task pollers for
@@ -639,6 +656,13 @@ func newActivityWorker(
 	params.WorkerStopChannel = getReadOnlyChannel(workerStopChannel)
 	ensureRequiredParams(&params)
 
+	// Reuse an externally provided drain tracker (AggregatedWorker) or create
+	// one for a standalone activity worker.
+	if params.stopDrainTracker == nil {
+		params.stopDrainTracker = newWorkerDrainTracker()
+	}
+	drainTracker := params.stopDrainTracker
+
 	// Get a activity task handler.
 	var taskHandler ActivityTaskHandler
 	if overrides != nil && overrides.activityTaskHandler != nil {
@@ -669,6 +693,7 @@ func newActivityWorker(
 		metricsHandler:               params.MetricsHandler,
 		sessionTokenBucket:           sessionTokenBucket,
 		workerPollCompleteOnShutdown: params.workerPollCompleteOnShutdown,
+		drainTracker:                 drainTracker,
 		slotReservationData: slotReservationData{
 			taskQueue:     params.TaskQueue,
 			taskQueueKind: enumspb.TASK_QUEUE_KIND_NORMAL,
@@ -683,6 +708,7 @@ func newActivityWorker(
 		poller:              poller,
 		identity:            params.Identity,
 		stopC:               workerStopChannel,
+		drainTracker:        drainTracker,
 	}
 }
 
@@ -697,10 +723,14 @@ func (aw *activityWorker) Start() error {
 	return nil // TODO: propagate errors
 }
 
-// Stop the worker.
+// Stop the worker. Safe to call concurrently or repeatedly: only the first
+// call closes the stop channel and drains; later calls return immediately so
+// the drain report is not counted twice.
 func (aw *activityWorker) Stop() {
-	close(aw.stopC)
-	aw.worker.Stop()
+	aw.stopOnce.Do(func() {
+		close(aw.stopC)
+		aw.worker.Stop()
+	})
 }
 
 func (aw *activityWorker) initializeTaskPollers(behavior PollerBehavior) {
@@ -1331,6 +1361,10 @@ type AggregatedWorker struct {
 	// pendingEnvironment is attached to every heartbeat (periodic and shutdown) until the server
 	// accepts one, at which point heartbeatSuccess clears it.
 	pendingEnvironment atomic.Pointer[workerpb.EnvironmentInfo]
+
+	// onStopDrainReport is invoked once after the first Stop() finishes, with
+	// the aggregated drain report from all child workers.
+	onStopDrainReport func(WorkerStopDrainReport)
 }
 
 // RegisterWorkflow registers workflow implementation with the AggregatedWorker
@@ -1717,7 +1751,49 @@ func (aw *AggregatedWorker) Stop() {
 
 	aw.unregisterHeartbeatWorker()
 
+	aw.emitStopDrainReport()
+
 	aw.logger.Info("Stopped Worker")
+}
+
+// stopDrainReport aggregates the drain reports from all child workers that
+// track in-flight tasks.
+func (aw *AggregatedWorker) stopDrainReport() WorkerStopDrainReport {
+	var report WorkerStopDrainReport
+	graceful := true
+	add := func(r WorkerStopDrainReport, hasTracker bool) {
+		if !hasTracker {
+			return
+		}
+		report.Completed += r.Completed
+		report.Canceled += r.Canceled
+		report.Failed += r.Failed
+		report.TimedOut += r.TimedOut
+		graceful = graceful && r.Graceful
+	}
+	if !util.IsInterfaceNil(aw.activityWorker) && aw.activityWorker.drainTracker != nil {
+		add(aw.activityWorker.worker.stopDrainReport(), true)
+	}
+	if !util.IsInterfaceNil(aw.sessionWorker) {
+		if aw.sessionWorker.activityWorker != nil && aw.sessionWorker.activityWorker.drainTracker != nil {
+			add(aw.sessionWorker.activityWorker.worker.stopDrainReport(), true)
+		}
+		if aw.sessionWorker.creationWorker != nil && aw.sessionWorker.creationWorker.drainTracker != nil {
+			add(aw.sessionWorker.creationWorker.worker.stopDrainReport(), true)
+		}
+	}
+	report.Graceful = graceful
+	return report
+}
+
+// emitStopDrainReport invokes the user callback with the aggregated drain
+// report. It is reached at most once because AggregatedWorker.Stop() returns
+// early on every call after the first.
+func (aw *AggregatedWorker) emitStopDrainReport() {
+	if aw.onStopDrainReport == nil {
+		return
+	}
+	aw.onStopDrainReport(aw.stopDrainReport())
 }
 
 func (aw *AggregatedWorker) registerHeartbeatWorker() error {
@@ -2712,6 +2788,7 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 		heartbeatMetrics:             heartbeatMetrics,
 		heartbeatCallback:            heartbeatCallback,
 		workerPollCompleteOnShutdown: workerPollCompleteOnShutdown,
+		onStopDrainReport:            options.OnWorkerStopDrainReport,
 	}
 	if client.heartbeatManager != nil {
 		aw.pendingEnvironment.Store(client.heartbeatManager.environmentInfo)

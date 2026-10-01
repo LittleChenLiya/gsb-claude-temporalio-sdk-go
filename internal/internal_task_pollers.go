@@ -178,6 +178,9 @@ type (
 		logger              log.Logger
 		activitiesPerSecond float64
 		numPollerMetric     *numPollerMetric
+		// drainTracker counts how in-flight activity tasks settle during the
+		// graceful stop drain. May be nil.
+		drainTracker *workerDrainTracker
 	}
 
 	historyIteratorImpl struct {
@@ -1646,6 +1649,7 @@ func newActivityTaskPoller(taskHandler ActivityTaskHandler, service workflowserv
 		logger:              params.Logger,
 		activitiesPerSecond: params.TaskQueueActivitiesPerSecond,
 		numPollerMetric:     newNumPollerMetric(params.MetricsHandler, metrics.PollerTypeActivityTask),
+		drainTracker:        params.stopDrainTracker,
 	}
 }
 
@@ -1734,6 +1738,12 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 
 	executionStartTime := time.Now()
 
+	// Track the task for the stop-drain report. The key is the unique task
+	// token. The drain tracker ignores it unless the worker is draining, so
+	// tasks completed long before Stop() never contribute.
+	drainKey := string(activityTask.task.GetTaskToken())
+	atp.drainTracker.taskStarted(drainKey)
+
 	// Process the activity task.
 	result, err := atp.taskHandler.Execute(atp.taskQueueName, activityTask.task)
 	request := result.response
@@ -1743,6 +1753,10 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 		activityMetricsHandler.
 			WithTags(metrics.ActivityTaskFailedTags(metrics.FailureReasonActivityError)).
 			Counter(metrics.ActivityExecutionFailedCounter).Inc(1)
+		// No terminal callback reached the server (the result is dropped/retried
+		// by the server), so if this happened during the drain count it as
+		// timed out, keeping the report consistent with actual callbacks.
+		atp.drainTracker.taskFinished(drainKey, DrainOutcomeTimedOut)
 		return err
 	}
 
@@ -1761,6 +1775,9 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 	activityMetricsHandler.Timer(metrics.ActivityExecutionLatency).Record(time.Since(executionStartTime))
 
 	if request == ErrActivityResultPending {
+		// The activity completion will be reported asynchronously later, not by
+		// this worker callback, so do not count it in this drain window.
+		atp.drainTracker.taskFinished(drainKey, DrainOutcomeTimedOut)
 		return nil
 	}
 
@@ -1770,8 +1787,15 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 		traceLog(func() {
 			atp.logger.Debug("reportActivityComplete failed", tagError, reportErr)
 		})
+		// The terminal callback was not delivered, so the server will time out
+		// and redispatch the task. Count it as timed out so the report matches
+		// actual callbacks.
+		atp.drainTracker.taskFinished(drainKey, DrainOutcomeTimedOut)
 		return reportErr
 	}
+
+	// Count the outcome based strictly on the callback actually sent.
+	atp.drainTracker.taskFinished(drainKey, drainOutcomeForActivityRequest(request))
 
 	if _, ok := request.(*workflowservice.RespondActivityTaskCompletedRequest); ok {
 		activityMetricsHandler.
@@ -1779,6 +1803,22 @@ func (atp *activityTaskPoller) ProcessTask(task any) error {
 			Record(time.Since(activityTask.task.GetScheduledTime().AsTime()))
 	}
 	return nil
+}
+
+// drainOutcomeForActivityRequest maps the terminal activity callback request
+// to a drain outcome, so the report agrees with what was sent to the server.
+func drainOutcomeForActivityRequest(request any) TaskDrainOutcome {
+	switch request.(type) {
+	case *workflowservice.RespondActivityTaskCompletedRequest:
+		return DrainOutcomeCompleted
+	case *workflowservice.RespondActivityTaskCanceledRequest:
+		return DrainOutcomeCanceled
+	case *workflowservice.RespondActivityTaskFailedRequest:
+		return DrainOutcomeFailed
+	default:
+		// nil request (nothing to report) means no callback was sent.
+		return DrainOutcomeTimedOut
+	}
 }
 
 func reportActivityComplete(

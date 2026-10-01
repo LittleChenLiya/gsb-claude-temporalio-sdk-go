@@ -22,6 +22,14 @@ to docs, or any other relevant information.
 
 ### Added
 
+- `worker.Options` gains `OnWorkerStopDrainReport`, a callback invoked once after
+  `Worker.Stop()` finishes draining in-flight tasks. It receives a
+  `worker.StopDrainReport` with the number of tasks that completed, were
+  canceled, failed, or were still in flight (timed out) during the drain, plus a
+  `Graceful` flag. The report is derived strictly from the terminal callbacks
+  actually sent (tasks that could not report before `WorkerStopTimeout` are
+  counted as timed out), and repeated `Stop()` calls are now safe and never
+  recount.
 - `TestWorkflowEnvironment` and `TestActivityEnvironment` now run worker plugins set through
   `SetWorkerOptions(worker.Options{Plugins: ...})`, which were previously ignored. Once plugins are
   set, `SetWorkerOptions` may not be called again on that environment, and what a plugin registers

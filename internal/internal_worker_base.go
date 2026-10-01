@@ -222,6 +222,9 @@ type (
 		slotReservationData          slotReservationData
 		isInternalWorker             bool
 		workerPollCompleteOnShutdown *atomic.Bool
+		// drainTracker counts how in-flight tasks settle during the graceful
+		// stop drain. It is optional; when nil no drain report is produced.
+		drainTracker *workerDrainTracker
 	}
 
 	// baseWorker that wraps worker activities.
@@ -257,6 +260,11 @@ type (
 
 		noRepoll atomic.Bool
 		pollerWG sync.WaitGroup
+
+		stopOnce     sync.Once
+		drainTracker *workerDrainTracker
+		// drainReport is populated by Stop() once the drain is finalized.
+		drainReport WorkerStopDrainReport
 	}
 
 	eagerOrPolledTask interface {
@@ -394,6 +402,7 @@ func newBaseWorker(
 		taskLimiterContext:       taskLimiterCtx,
 		taskLimiterContextCancel: taskLimiterCancel,
 		sessionTokenBucket:       options.sessionTokenBucket,
+		drainTracker:             options.drainTracker,
 	}
 	// Set secondary retrier as resource exhausted
 	bw.retrier.SetSecondaryRetryPolicy(pollResourceExhaustedRetryPolicy)
@@ -878,25 +887,52 @@ func isNonRetriableError(err error) bool {
 }
 
 // Stop is a blocking call and cleans up all the resources associated with worker.
+// It is safe to call concurrently and repeatedly: only the first call performs
+// the shutdown and produces the drain report; later calls return immediately.
 func (bw *baseWorker) Stop() {
 	if !bw.isWorkerStarted {
 		return
 	}
+	bw.stopOnce.Do(bw.stop)
+}
+
+func (bw *baseWorker) stop() {
 	close(bw.stopCh)
 	bw.limiterContextCancel()
 	if bw.sessionTokenBucket != nil {
 		bw.sessionTokenBucket.close()
 	}
 
+	// Snapshot in-flight tasks so the drain report reflects what was executing
+	// when shutdown began.
+	if bw.drainTracker != nil {
+		bw.drainTracker.beginDrain()
+	}
+
 	// Wait for pollers, task dispatch, and task processing to complete, or until stopTimeout elapses.
 	// The task dispatcher drains taskQueueCh after the closer goroutine
 	// closes it when pollers finish.
-	if success := awaitWaitGroup(&bw.stopWG, bw.options.stopTimeout); !success {
+	success := awaitWaitGroup(&bw.stopWG, bw.options.stopTimeout)
+	if !success {
 		traceLog(func() {
 			bw.logger.Info("Worker graceful stop timed out.", "Stop timeout", bw.options.stopTimeout)
 		})
 	}
 	bw.taskLimiterContextCancel()
+
+	// Finalize the drain report after the stop wait is over: tasks that
+	// settled during the wait are counted by outcome, anything still running is
+	// counted as timed out.
+	if bw.drainTracker != nil {
+		bw.drainReport = bw.drainTracker.finishDrain(success)
+		bw.logger.Info("Worker stop drain report",
+			"Completed", bw.drainReport.Completed,
+			"Canceled", bw.drainReport.Canceled,
+			"Failed", bw.drainReport.Failed,
+			"TimedOut", bw.drainReport.TimedOut,
+			"Graceful", bw.drainReport.Graceful,
+		)
+	}
 
 	// Close context
 	if bw.options.backgroundContextCancel != nil {
@@ -904,6 +940,15 @@ func (bw *baseWorker) Stop() {
 	}
 
 	bw.isWorkerStarted = false
+}
+
+// stopDrainReport returns the report produced by Stop(). It returns a zero
+// report if the worker was never stopped or has no drain tracker.
+func (bw *baseWorker) stopDrainReport() WorkerStopDrainReport {
+	if bw.drainTracker == nil {
+		return WorkerStopDrainReport{}
+	}
+	return bw.drainReport
 }
 
 func (bw *baseWorker) stopPolling() {

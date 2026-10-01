@@ -358,6 +358,15 @@ type (
 		// returns, Worker.Stop() will be called.
 		OnFatalError func(error)
 
+		// Optional: Callback invoked once when Worker.Stop() finishes draining
+		// in-flight tasks. The report contains the number of tasks that
+		// completed, were canceled, or failed during the drain, and the number
+		// still in flight (timed out) when WorkerStopTimeout elapsed. The
+		// callback reflects the actual terminal callbacks the worker sent and
+		// is invoked at most once even when Stop() is called repeatedly. It is
+		// invoked from the goroutine that completes the (first) Stop().
+		OnWorkerStopDrainReport func(WorkerStopDrainReport)
+
 		// Optional: Disable eager activities. If set to true, activities will not
 		// be requested to execute eagerly from the same workflow regardless of
 		// MaxEagerActivityReservationsPerWorkflowTask or
