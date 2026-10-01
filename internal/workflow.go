@@ -1750,6 +1750,69 @@ func NewTimerWithOptions(ctx Context, d time.Duration, options TimerOptions) Fut
 	return i.NewTimerWithOptions(ctx, d, options)
 }
 
+// Timer is a handle to a workflow timer created by [NewTimerHandle] or [NewTimerHandleWithOptions]. It embeds the
+// [Future] that becomes ready when the timer fires (or is canceled) and additionally allows querying the remaining
+// time until the timer fires.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.Timer]
+type Timer interface {
+	Future
+
+	// RemainingTime returns the duration until the timer fires. It is computed from workflow time (see [Now]), so
+	// it is deterministic and returns the same value during replay. It returns zero once the timer has fired or has
+	// been canceled. RemainingTime is read-only and safe to call from query handlers.
+	RemainingTime() time.Duration
+}
+
+type timerImpl struct {
+	Future
+	// fireAt is the workflow time at which the timer fires.
+	fireAt time.Time
+	// now returns the current workflow time. It is captured at creation time so RemainingTime does not need a
+	// context and stays callable from read-only contexts like query handlers.
+	now func() time.Time
+}
+
+func (t *timerImpl) RemainingTime() time.Duration {
+	if t.Future.IsReady() {
+		// The timer already fired or was canceled.
+		return 0
+	}
+	if remaining := t.fireAt.Sub(t.now()); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// NewTimerHandle returns a [Timer] handle for a new workflow timer that fires after the specified duration d. The
+// handle behaves like the [Future] returned by [NewTimer] and additionally supports querying the remaining time
+// until the timer fires via [Timer.RemainingTime], which is useful to decide whether to keep waiting before
+// canceling the timer. Cancel the pending timer by canceling the Context (using context from
+// workflow.WithCancel(ctx)); after cancellation RemainingTime returns zero and Future.Get() returns
+// *CanceledError.
+//
+// To be able to set options like timer summary, use [NewTimerHandleWithOptions].
+//
+// Exposed as: [go.temporal.io/sdk/workflow.NewTimerHandle]
+func NewTimerHandle(ctx Context, d time.Duration) Timer {
+	return NewTimerHandleWithOptions(ctx, d, TimerOptions{})
+}
+
+// NewTimerHandleWithOptions is like [NewTimerHandle] but allows setting additional options like the timer summary.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.NewTimerHandleWithOptions]
+func NewTimerHandleWithOptions(ctx Context, d time.Duration, options TimerOptions) Timer {
+	assertNotInReadOnlyState(ctx)
+	i := getWorkflowOutboundInterceptor(ctx)
+	future := i.NewTimerWithOptions(ctx, d, options)
+	fireAt := i.Now(ctx).Add(d)
+	return &timerImpl{
+		Future: future,
+		fireAt: fireAt,
+		now:    func() time.Time { return i.Now(ctx) },
+	}
+}
+
 func (wc *workflowEnvironmentInterceptor) NewTimer(ctx Context, d time.Duration) Future {
 	return wc.NewTimerWithOptions(ctx, d, TimerOptions{})
 }

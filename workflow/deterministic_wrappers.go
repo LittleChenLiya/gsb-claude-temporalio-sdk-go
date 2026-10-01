@@ -47,6 +47,11 @@ type (
 	// TimerOptions are options for [NewTimerWithOptions]
 	TimerOptions = internal.TimerOptions
 
+	// Timer is a handle to a workflow timer created by [NewTimerHandle] or [NewTimerHandleWithOptions]. It embeds
+	// the [Future] that becomes ready when the timer fires (or is canceled) and additionally allows querying the
+	// remaining time until the timer fires via [Timer.RemainingTime].
+	Timer = internal.Timer
+
 	// AwaitOptions are options for [AwaitWithOptions]
 	AwaitOptions = internal.AwaitOptions
 )
@@ -193,6 +198,25 @@ func NewTimer(ctx Context, d time.Duration) Future {
 // timer is canceled, the returned Future becomes ready, and Future.Get() will return *CanceledError.
 func NewTimerWithOptions(ctx Context, d time.Duration, options TimerOptions) Future {
 	return internal.NewTimerWithOptions(ctx, d, options)
+}
+
+// NewTimerHandle returns a [Timer] handle for a new workflow timer that fires after the specified duration d. The
+// handle behaves like the [Future] returned by [NewTimer] and additionally supports querying the remaining time
+// until the timer fires via [Timer.RemainingTime], which is useful to decide whether to keep waiting before
+// canceling the timer. The remaining time is computed from workflow time (see [Now]), so it is deterministic and
+// returns the same value during replay; it returns zero once the timer has fired or has been canceled.
+// [Timer.RemainingTime] is read-only and safe to call from query handlers.
+//
+// You can cancel the pending timer by canceling the Context (using the context from workflow.WithCancel(ctx)).
+//
+// To be able to set options like timer summary, use [NewTimerHandleWithOptions].
+func NewTimerHandle(ctx Context, d time.Duration) Timer {
+	return internal.NewTimerHandle(ctx, d)
+}
+
+// NewTimerHandleWithOptions is like [NewTimerHandle] but allows setting additional options like the timer summary.
+func NewTimerHandleWithOptions(ctx Context, d time.Duration, options TimerOptions) Timer {
+	return internal.NewTimerHandleWithOptions(ctx, d, options)
 }
 
 // Sleep pauses the current workflow for at least the duration d. A negative or zero duration causes Sleep to return
